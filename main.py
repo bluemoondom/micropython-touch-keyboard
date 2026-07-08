@@ -612,7 +612,7 @@ def draw_topbtn():
         return 
     bx, by, bw, bh = TOPB
     filled_rrect(bx, by, bw, bh, 8, C_OK if usb_state else C_DIS)
-    lab = "MOUSE" if screen == 0 else "KYEB"
+    lab = "MOUSE" if screen == 0 else "KEYB"
     col = C_BLACK if usb_state else C_HINT
     prnt_st(lab, bx + (bw - len(lab) * 6) // 2, by + (bh - 8) // 2, 1, col)
 
