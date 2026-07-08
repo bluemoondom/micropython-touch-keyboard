@@ -42,10 +42,7 @@ Everything runs in MicroPython directly on the RP2350 — no PC-side frameworks.
 2. **USB libraries:** upload the contents of `usb_keyboard_lib.zip` to `/lib`
    on the board, resulting in `/lib/usb/device/{__init__,core,hid,keyboard}.py`
    (files come from [micropython-lib](https://github.com/micropython/micropython-lib), MIT).
-3. **Model:** on your PC run `python train_emnist_balanced.py`
-   (only `pip install numpy` needed; the ~33 MB dataset downloads
-   automatically). This produces `emnist_w.bin` (~157 kB).
-4. **Upload:** copy `main.py` and `emnist_w.bin` to the root of the board's
+3. **Upload:** copy `main.py` and `emnist_w.bin` to the root of the board's
    flash (e.g. via Thonny), reset — done.
 
 ## Usage
