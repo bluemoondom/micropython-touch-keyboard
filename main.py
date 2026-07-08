@@ -23,7 +23,7 @@ class LCD_1inch28(framebuf.FrameBuffer):
         self.width  = 240
         self.height = 240
         self.cs  = Pin(CS,  Pin.OUT)
-        self.rst = Pin(RST, Pin.OUT)
+        self.rst = Pin(RST, Pin.OUT) 
         self.cs(1)
         self.spi = SPI(1, 100_000_000, polarity=0, phase=0,
                        sck=Pin(SCK), mosi=Pin(MOSI), miso=None)
@@ -154,7 +154,6 @@ class LCD_1inch28(framebuf.FrameBuffer):
         self.spi.write(self.buffer)
         self.cs(1)
 
-
 i2c = I2C(1, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA), freq=400_000)
 
 class CST816S:
@@ -193,6 +192,7 @@ C_TEXT   = colour(220, 210, 120)
 C_BTN    = colour(0, 120, 115)
 C_BTNTX  = colour(200, 255, 250)
 C_HINT   = colour(60, 70, 80)
+C_DIS    = colour(40, 44, 54) 
 C_OK     = colour(80, 220, 120)
 C_WARN   = colour(230, 120, 80)
 
@@ -331,8 +331,8 @@ BTNS = (
     (126, 184, 44, 22),
     (178, 162, 44, 22),
 )
-BTN_LABELS = ("", "DEL", "SPC", "CLR")
-MODE_NAMES = ("VSE", "ABC", "123")
+BTN_LABELS = ("", "SPC", "CLR", "DEL")
+MODE_NAMES = ("ALL", "ABC", "123")
 mode = 0
 
 def chord(y):
@@ -362,13 +362,11 @@ def filled_rrect(x, y, w, h, r, col):
 
 def draw_static():
     LCD.fill(C_BLACK)
-
     LCD.fill_rect(0, CANV_Y0, 240, CANV_Y1 - CANV_Y0, C_BG)
     a = chord(CANV_Y0 - 1)
     LCD.hline(120 - a, CANV_Y0 - 1, 2 * a, C_HINT)
     a = chord(CANV_Y1)
     LCD.hline(120 - a, CANV_Y1, 2 * a, C_HINT)
-
     for i in range(len(BTNS)):
         bx, by, bw, bh = BTNS[i]
         filled_rrect(bx, by, bw, bh, 8, C_BTN)
@@ -406,7 +404,6 @@ def clear_canvas():
 
 def pen_dot(x, y):
     global has_ink
-
     for dy in range(-PEN_R, PEN_R + 1):
         yy = y + dy
         if yy <= CANV_Y0 or yy >= CANV_Y1:
@@ -414,7 +411,6 @@ def pen_dot(x, y):
         a = int(math.sqrt(PEN_R * PEN_R - dy * dy))
         x0 = max(0, x - a)
         LCD.hline(x0, yy, min(240, x + a + 1) - x0, C_INK)
-
     if x - PEN_R < bbox[0]: bbox[0] = max(0, x - PEN_R)
     if y - PEN_R < bbox[1]: bbox[1] = max(CANV_Y0 + 1, y - PEN_R)
     if x + PEN_R > bbox[2]: bbox[2] = min(239, x + PEN_R)
@@ -504,18 +500,69 @@ except Exception as e:
     model_ok = False
     model_err = str(e)
 
+
 USB_KBD     = True
 HOST_QWERTZ = False
 
-hid = None
+hid   = None
+mouse = None
+usb_err = ""
 if USB_KBD:
     try:
         import usb.device
         from usb.device.keyboard import KeyboardInterface
-        hid = KeyboardInterface()
-        usb.device.get().init(hid, builtin_driver=True)
+        from usb.device.hid import HIDInterface
+
+        _PAD_DESC = bytes((
+            0x05, 0x01, 0x09, 0x02, 0xA1, 0x01,
+            0x09, 0x01, 0xA1, 0x00,
+            0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
+            0x15, 0x00, 0x25, 0x01,
+            0x95, 0x03, 0x75, 0x01, 0x81, 0x02,
+            0x95, 0x01, 0x75, 0x05, 0x81, 0x01,
+            0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38,
+            0x15, 0x81, 0x25, 0x7F,
+            0x75, 0x08, 0x95, 0x03, 0x81, 0x06,
+            0xC0, 0xC0,
+        ))
+
+        class PadMouse(HIDInterface):
+            def __init__(self):
+                super().__init__(_PAD_DESC, protocol=2,
+                                 interface_str="RP2350 Touchpad")
+                self.btn = 0
+                self._buf = bytearray(4)
+
+            def flush(self, dx=0, dy=0, wh=0):
+                if self.busy():
+                    return False
+                struct.pack_into("Bbbb", self._buf, 0,
+                                 self.btn, dx, dy, wh)
+                self.send_report(self._buf)
+                return True
+
+            def set_btn(self, mask, down):
+                if down:
+                    self.btn |= mask
+                else:
+                    self.btn &= (~mask) & 0xFF
+                for _ in range(60): 
+                    if self.flush():
+                        return
+                    time.sleep_ms(1)
+
+        hid   = KeyboardInterface()
+        mouse = PadMouse()
+
+        usb.device.get().init(hid, mouse, builtin_driver=True)
     except ImportError:
-        hid = None
+        hid   = None
+        mouse = None
+    except Exception as e:
+        hid   = None
+        mouse = None
+        usb_err = str(e)
+        print("USB init selhal:", e)
 
 def usb_send(ch):
     if hid is None:
@@ -524,13 +571,12 @@ def usb_send(ch):
         if not hid.is_open():
             return
         if ch == " ":
-            code = 44  
+            code = 44 
         elif ch == "\b":
-            code = 42  
+            code = 42 
         elif "0" <= ch <= "9":
             d = ord(ch) - 48
             if HOST_QWERTZ:
-
                 code = 98 if d == 0 else 88 + d 
             else:
                 code = 39 if d == 0 else 29 + d 
@@ -540,34 +586,100 @@ def usb_send(ch):
                 return
             code = 4 + i
             if HOST_QWERTZ:
-                if code == 28:   code = 29 
+                if code == 28:   code = 29
                 elif code == 29: code = 28
+        t0 = time.ticks_ms()
+        while hid.busy():
+            if time.ticks_diff(time.ticks_ms(), t0) > 50:
+                return
+            time.sleep_ms(1)
         hid.send_keys((code,))
         time.sleep_ms(10)
+        t0 = time.ticks_ms()
+        while hid.busy():
+            if time.ticks_diff(time.ticks_ms(), t0) > 50:
+                return
+            time.sleep_ms(1)
         hid.send_keys(())
         time.sleep_ms(5)
     except Exception:
         pass
 
-def draw_usb(state):
-    LCD.fill_rect(105, 3, 30, 9, C_BLACK)
-    prnt_st("USB", 111, 3, 1, C_OK if state else C_HINT)
+TOPB = (92, 2, 56, 16) 
+
+def draw_topbtn():
+    if mouse is None:
+        return 
+    bx, by, bw, bh = TOPB
+    filled_rrect(bx, by, bw, bh, 8, C_OK if usb_state else C_DIS)
+    lab = "MOUSE" if screen == 0 else "KYEB"
+    col = C_BLACK if usb_state else C_HINT
+    prnt_st(lab, bx + (bw - len(lab) * 6) // 2, by + (bh - 8) // 2, 1, col)
+
+def top_hit(tx, ty):
+    bx, by, bw, bh = TOPB
+    return bx - 6 <= tx <= bx + bw + 6 and ty <= by + bh + 5
+
+PAD_Y0 = 24
+PAD_Y1 = 158
+PAD_SPEED = 3.5
+SCROLL_DIV = 10
+
+PBTNS = (
+    ( 32, 174, 52, 24),
+    ( 94, 186, 52, 24),
+    (156, 174, 52, 24),
+)
+PBTN_LABELS = ("LEFT", "SCROLL", "RIGHT")
+
+def draw_pad_static():
+    LCD.fill(C_BLACK)
+    LCD.fill_rect(0, PAD_Y0, 240, PAD_Y1 - PAD_Y0, C_BG)
+    a = chord(PAD_Y0 - 1)
+    LCD.hline(120 - a, PAD_Y0 - 1, 2 * a, C_HINT)
+    a = chord(PAD_Y1)
+    LCD.hline(120 - a, PAD_Y1, 2 * a, C_HINT)
+    cntr_st("TOUCHPAD", (PAD_Y0 + PAD_Y1) // 2 - 4, 1, C_HINT)
+    for i in range(len(PBTNS)):
+        draw_pbtn(i, False)
+    draw_topbtn()
+
+def draw_pbtn(i, active):
+    bx, by, bw, bh = PBTNS[i]
+    on = active or (i == 1 and scr_mode)
+    filled_rrect(bx, by, bw, bh, 8, C_OK if on else C_BTN)
+    lab = PBTN_LABELS[i]
+    prnt_st(lab, bx + (bw - len(lab) * 6) // 2, by + (bh - 8) // 2, 1,
+            C_BLACK if on else C_BTNTX)
+
+def pbtn_hit(tx, ty):
+    for i in range(len(PBTNS)):
+        bx, by, bw, bh = PBTNS[i]
+        if bx - 5 <= tx <= bx + bw + 5 and by - 5 <= ty <= by + bh + 5:
+            return i
+    return -1
+
+def reset_kbd_state():
+    global bbox, has_ink
+    bbox = [1000, 1000, -1, -1]
+    has_ink = False
 
 text = ""
 bbox = [1000, 1000, -1, -1]
 has_ink = False
+screen = 0 
+usb_state = False
+scr_mode = False
 
 draw_static()
-
 if not model_ok:
     cntr_st("CHYBA MODELU:", 92, 1, C_WARN)
     cntr_st(model_err[:34].upper(), 106, 1, C_WARN)
     cntr_st("NAHRAJ NOVY EMNIST_W.BIN", 120, 1, C_WARN)
-
 draw_text()
-usb_state = False
-if hid is not None:
-    draw_usb(False)
+if usb_err:
+    cntr_st(("USB CHYBA: " + usb_err)[:34].upper(), 36, 1, C_WARN)
+draw_topbtn()
 LCD.show()
 
 usb_chk    = 0
@@ -576,83 +688,209 @@ last_x = last_y = 0
 last_lift  = time.ticks_ms()
 last_show  = 0
 dirty      = False
-in_canvas  = False 
+in_canvas  = False
 
-while True:
-    down, tx, ty = touch.read()
-    now = time.ticks_ms()
+p_zone      = 0 
+p_btn_held  = -1
+p_t_down    = 0
+p_moved     = 0
+p_dragging  = False
+p_last_tap  = -10000
+fx = fy = fw = 0.0 
 
-    if down:
-        if not was_down:
-
-            in_canvas = CANV_Y0 < ty < CANV_Y1
-            if not in_canvas:
-                b = btn_hit(tx, ty)
-                if b == 0:
-                    mode = (mode + 1) % 3
-                    draw_mode()
-                    dirty = True
-                elif b == 1:
-                    text = text[:-1]
-                    usb_send("\b")
-                elif b == 2:
-                    text += " "
-                    usb_send(" ")
-                elif b == 3:
-                    text = ""
-                if b >= 1:
-                    draw_text()
-                    dirty = True
-        if in_canvas and model_ok:
-
-            cy = min(max(ty, CANV_Y0 + 1), CANV_Y1 - 1)
-            if was_down:
-                pen_line(last_x, last_y, tx, cy)
-            else:
-                pen_dot(tx, cy)
-            dirty = True
-            last_x, last_y = tx, cy
-        else:
-            last_x, last_y = tx, ty
-        was_down = True
+def switch_screen():
+    global screen, in_canvas, p_zone, p_dragging, fx, fy, fw
+    screen ^= 1
+    in_canvas = False
+    p_zone = 0
+    fx = fy = fw = 0.0
+    if p_dragging and mouse is not None:
+        try: mouse.set_btn(1, False)
+        except Exception: pass
+    p_dragging = False
+    reset_kbd_state()
+    if screen == 0:
+        draw_static()
+        draw_text()
+        draw_topbtn()
     else:
-        if was_down:
-            last_lift = now
-        was_down = False
+        draw_pad_static()
 
-        if has_ink and model_ok and time.ticks_diff(now, last_lift) > IDLE_MS:
-            if rasterize():
-                t0 = time.ticks_ms()
-                cls, conf = net.predict(_x28, ALLOWED[mode])
-                dt = time.ticks_diff(time.ticks_ms(), t0)
-                letter = net.cmap[cls]
-                if "a" <= letter <= "z":
-                    letter = chr(ord(letter) - 32)
-                text += letter
-                usb_send(letter)
-                if len(text) > 60:
-                    text = text[-60:]
-                draw_text()
-
-                LCD.fill_rect(0, CANV_Y1 - 14, 240, 13, C_BG)
-                cntr_st("%s  %d%%  %dMS" % (letter, int(conf * 100), dt),
-                        CANV_Y1 - 13, 1, C_OK if conf > 0.5 else C_WARN)
-                LCD.show()
-                time.sleep_ms(350)
-            clear_canvas()
-            dirty = True
-
-    if hid is not None and time.ticks_diff(now, usb_chk) > 500:
-        usb_chk = now
-        st = hid.is_open()
-        if st != usb_state:
-            usb_state = st
-            draw_usb(st)
-            dirty = True
-
-    if dirty and time.ticks_diff(now, last_show) > 40:
+def _fatal(e):
+    try:
+        LCD.fill_rect(0, 56, 240, 116, C_BLACK)
+        cntr_st("CHYBA PROGRAMU:", 62, 1, C_WARN)
+        s = repr(e).upper()
+        y = 78
+        while s and y < 168:
+            cntr_st(s[:26], y, 1, C_WARN)
+            s = s[26:]
+            y += 12
         LCD.show()
-        last_show = now
-        dirty = False
+    except Exception:
+        pass
 
-    time.sleep_ms(5)
+try:
+    while True:
+        down, tx, ty = touch.read()
+        now = time.ticks_ms()
+
+        if down and not was_down and top_hit(tx, ty) and mouse is not None:
+            if usb_state:
+                switch_screen()
+                dirty = True
+            was_down = True
+            time.sleep_ms(5)
+            continue
+
+        if screen == 0:
+            if down:
+                if not was_down:
+                    in_canvas = CANV_Y0 < ty < CANV_Y1
+                    if not in_canvas:
+                        b = btn_hit(tx, ty)
+                        if b == 0:
+                            mode = (mode + 1) % 3
+                            draw_mode()
+                            dirty = True
+                        elif b == 1:
+                            text += " "
+                            usb_send(" ")
+                        elif b == 2:
+                            text = ""
+                        elif b == 3:
+                            text = text[:-1]
+                            usb_send("\b")
+                        if b >= 1:
+                            draw_text()
+                            dirty = True
+                if in_canvas and model_ok:
+                    cy = min(max(ty, CANV_Y0 + 1), CANV_Y1 - 1)
+                    if was_down:
+                        pen_line(last_x, last_y, tx, cy)
+                    else:
+                        pen_dot(tx, cy)
+                    dirty = True
+                    last_x, last_y = tx, cy
+                else:
+                    last_x, last_y = tx, ty
+                was_down = True
+            else:
+                if was_down:
+                    last_lift = now
+                was_down = False
+
+                if has_ink and model_ok and time.ticks_diff(now, last_lift) > IDLE_MS:
+                    if rasterize():
+                        t0 = time.ticks_ms()
+                        cls, conf = net.predict(_x28, ALLOWED[mode])
+                        dt = time.ticks_diff(time.ticks_ms(), t0)
+                        letter = net.cmap[cls]
+                        if "a" <= letter <= "z":
+                            letter = chr(ord(letter) - 32)
+                        text += letter
+                        usb_send(letter)
+                        if len(text) > 60:
+                            text = text[-60:]
+                        draw_text()
+                        LCD.fill_rect(0, CANV_Y1 - 14, 240, 13, C_BG)
+                        cntr_st("%s  %d%%  %dMS" % (letter, int(conf * 100), dt),
+                                CANV_Y1 - 13, 1, C_OK if conf > 0.5 else C_WARN)
+                        LCD.show()
+                        time.sleep_ms(350)
+                    clear_canvas()
+                    dirty = True
+
+        else:
+            if down:
+                if not was_down:
+                    if PAD_Y0 < ty < PAD_Y1:
+                        p_zone = 1
+                        p_t_down = now
+                        p_moved = 0
+                        if (not scr_mode
+                                and time.ticks_diff(now, p_last_tap) < 300):
+                            p_dragging = True
+                            if mouse is not None:
+                                mouse.set_btn(1, True)
+                    else:
+                        pb = pbtn_hit(tx, ty)
+                        if pb == 1:
+                            scr_mode = not scr_mode
+                            draw_pbtn(1, False)
+                            dirty = True
+                            p_zone = 0
+                        elif pb >= 0:
+                            p_zone = 2
+                            p_btn_held = pb
+                            draw_pbtn(pb, True)
+                            dirty = True
+                            if mouse is not None:
+                                mouse.set_btn(1 if pb == 0 else 2, True)
+                        else:
+                            p_zone = 0
+                elif p_zone == 1:
+                    dx = tx - last_x
+                    dy = ty - last_y
+                    p_moved += abs(dx) + abs(dy)
+                    if scr_mode:
+                        fw -= dy / SCROLL_DIV
+                    else:
+                        fx += dx * PAD_SPEED
+                        fy += dy * PAD_SPEED
+                last_x, last_y = tx, ty
+                was_down = True
+            else:
+                if was_down:
+                    if p_zone == 1:
+                        dur = time.ticks_diff(now, p_t_down)
+                        if p_dragging:
+                            p_dragging = False
+                            if mouse is not None:
+                                mouse.set_btn(1, False)
+                        elif (not scr_mode and dur < 250 and p_moved < 8
+                              and mouse is not None):
+                            mouse.set_btn(1, True)
+                            time.sleep_ms(15)
+                            mouse.set_btn(1, False)
+                        p_last_tap = now
+                    elif p_zone == 2 and p_btn_held >= 0:
+                        if mouse is not None:
+                            mouse.set_btn(1 if p_btn_held == 0 else 2, False)
+                        draw_pbtn(p_btn_held, False)
+                        dirty = True
+                        p_btn_held = -1
+                    p_zone = 0
+                was_down = False
+
+            if mouse is not None and usb_state:
+                mx = int(fx); my = int(fy); mw = int(fw)
+                if mx or my or mw:
+                    if mx > 127: mx = 127
+                    elif mx < -127: mx = -127
+                    if my > 127: my = 127
+                    elif my < -127: my = -127
+                    if mw > 7: mw = 7
+                    elif mw < -7: mw = -7
+                    if mouse.flush(mx, my, mw):
+                        fx -= mx; fy -= my; fw -= mw
+
+        if hid is not None and time.ticks_diff(now, usb_chk) > 500:
+            usb_chk = now
+            st = hid.is_open()
+            if st != usb_state:
+                usb_state = st
+                draw_topbtn()
+                dirty = True
+                if not st and screen == 1:
+                    switch_screen()
+
+        if dirty and time.ticks_diff(now, last_show) > 40:
+            LCD.show()
+            last_show = now
+            dirty = False
+
+        time.sleep_ms(5)
+except Exception as _e:
+    _fatal(_e)
+    raise
