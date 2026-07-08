@@ -153,7 +153,8 @@ class LCD_1inch28(framebuf.FrameBuffer):
         self.cs(1); self.dc(1); self.cs(0)
         self.spi.write(self.buffer)
         self.cs(1)
-        
+
+
 i2c = I2C(1, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA), freq=400_000)
 
 class CST816S:
@@ -181,7 +182,6 @@ class CST816S:
         return (True, x, y)
 
 
-# ── Barvy ────────────────────────────────────────────────────
 def colour(R, G, B):
     return (((G & 0b00011100) << 3) + ((B & 0b11111000) >> 3) << 8) \
            + (R & 0b11111000) + ((G & 0b11100000) >> 5)
@@ -244,20 +244,32 @@ def cntr_st(s, y, sz, col):
     prnt_st(s, x, y, sz, col)
 
 def load_model(path="emnist_w.bin"):
+    import gc
     with open(path, "rb") as f:
-        if f.read(4) != b"EMK1":
+        magic = f.read(4)
+        if magic == b"EMK1":
+            raise ValueError("Stary format vah — pretrenuj pomoci "
+                             "train_emnist_balanced.py")
+        if magic != b"EMK2":
             raise ValueError("Spatny format emnist_w.bin")
         n_in, n_h, n_out = struct.unpack("<HHH", f.read(6))
-        s1 = struct.unpack("<f", f.read(4))[0]
-        w1 = bytearray(f.read(n_h * n_in)) 
-        b1 = array('f', struct.unpack("<%df" % n_h,  f.read(4 * n_h)))
-        w2 = array('f', struct.unpack("<%df" % (n_out * n_h), f.read(4 * n_out * n_h)))
+        s1, hs, s2 = struct.unpack("<fff", f.read(12))
+        gc.collect()
+        w1 = bytearray(n_h * n_in)
+        if f.readinto(w1) != n_h * n_in:
+            raise ValueError("Poskozeny soubor vah (W1)")
+        b1 = array('f', struct.unpack("<%df" % n_h, f.read(4 * n_h)))
+        w2 = bytearray(n_out * n_h)
+        if f.readinto(w2) != n_out * n_h:
+            raise ValueError("Poskozeny soubor vah (W2)")
         b2 = array('f', struct.unpack("<%df" % n_out, f.read(4 * n_out)))
-    return n_in, n_h, n_out, s1, w1, b1, w2, b2
+        cmap = f.read(n_out).decode()
+    gc.collect()
+    return n_in, n_h, n_out, s1, hs, s2, w1, b1, w2, b2, cmap
 
 
 @micropython.viper
-def _dense1(x: ptr8, w: ptr8, out: ptr32, n_in: int, n_out: int):
+def _dense(x: ptr8, w: ptr8, out: ptr32, n_in: int, n_out: int):
     for o in range(n_out):
         acc = 0
         base = o * n_in
@@ -268,57 +280,60 @@ def _dense1(x: ptr8, w: ptr8, out: ptr32, n_in: int, n_out: int):
 
 class EmnistNet:
     def __init__(self, path="emnist_w.bin"):
-        (self.n_in, self.n_h, self.n_out,
-         self.s1, self.w1, self.b1, self.w2, self.b2) = load_model(path)
-        self._acc = array('i', [0] * self.n_h)
-        self._h   = array('f', [0.0] * self.n_h)
+        (self.n_in, self.n_h, self.n_out, self.s1, self.hs, self.s2,
+         self.w1, self.b1, self.w2, self.b2, self.cmap) = load_model(path)
+        self._acc1 = array('i', [0] * self.n_h)
+        self._hq   = bytearray(self.n_h)
+        self._acc2 = array('i', [0] * self.n_out)
 
-    def predict(self, x_u8):
-        """x_u8: bytearray(784) — vrátí (index 0..25, confidence 0..1)."""
-        _dense1(x_u8, self.w1, self._acc, self.n_in, self.n_h)
-        k  = self.s1 / 255.0
+    def predict(self, x_u8, allowed=None):
+        _dense(x_u8, self.w1, self._acc1, self.n_in, self.n_h)
+        k1 = self.s1 / 255.0
+        hs = self.hs
         b1 = self.b1
-        h  = self._h
+        hq = self._hq
         for j in range(self.n_h):
-            v = self._acc[j] * k + b1[j]
-            h[j] = v if v > 0.0 else 0.0
-        w2 = self.w2
+            v = self._acc1[j] * k1 + b1[j]
+            if v <= 0.0:
+                hq[j] = 0
+            elif v >= hs:
+                hq[j] = 255
+            else:
+                hq[j] = int(v / hs * 255.0 + 0.5)
+        _dense(hq, self.w2, self._acc2, self.n_h, self.n_out)
+        k2 = self.s2 * hs / 255.0
         b2 = self.b2
-        best, best2, bi = -1e30, -1e30, 0
-        logits = [0.0] * self.n_out
-        for c in range(self.n_out):
-            s = b2[c]
-            base = c * self.n_h
-            for j in range(self.n_h):
-                s += w2[base + j] * h[j]
-            logits[c] = s
+        if allowed is None:
+            allowed = range(self.n_out)
+        best, bi = -1e30, -1
+        logits = []
+        for c in allowed:
+            s = self._acc2[c] * k2 + b2[c]
+            logits.append(s)
             if s > best:
-                best2 = best
                 best, bi = s, c
-            elif s > best2:
-                best2 = s
-                
-        m = best
         tot = 0.0
-        for c in range(self.n_out):
-            tot += math.exp(logits[c] - m)
-        conf = 1.0 / tot
-        return bi, conf
+        for s in logits:
+            tot += math.exp(s - best)
+        return bi, 1.0 / tot
 
-
-TXT_Y    = 22 
+TXT_Y    = 22
 CANV_Y0  = 46
-CANV_Y1  = 170
+CANV_Y1  = 158
 PEN_R    = 5
 IDLE_MS  = 700
 
 MAX_CHARS = 12
 
 BTNS = (
-    ( 32, 174, 52, 24, "DEL"),
-    ( 94, 186, 52, 24, "SPC"),
-    (156, 174, 52, 24, "CLR"),
+    ( 18, 162, 44, 22),
+    ( 70, 184, 44, 22),
+    (126, 184, 44, 22),
+    (178, 162, 44, 22),
 )
+BTN_LABELS = ("", "DEL", "SPC", "CLR")
+MODE_NAMES = ("VSE", "ABC", "123")
+mode = 0
 
 def chord(y):
     dy = y - 120
@@ -347,19 +362,31 @@ def filled_rrect(x, y, w, h, r, col):
 
 def draw_static():
     LCD.fill(C_BLACK)
+
     LCD.fill_rect(0, CANV_Y0, 240, CANV_Y1 - CANV_Y0, C_BG)
     a = chord(CANV_Y0 - 1)
     LCD.hline(120 - a, CANV_Y0 - 1, 2 * a, C_HINT)
     a = chord(CANV_Y1)
     LCD.hline(120 - a, CANV_Y1, 2 * a, C_HINT)
-    
-    for bx, by, bw, bh, lab in BTNS:
+
+    for i in range(len(BTNS)):
+        bx, by, bw, bh = BTNS[i]
         filled_rrect(bx, by, bw, bh, 8, C_BTN)
-        prnt_st(lab, bx + (bw - 33) // 2, by + (bh - 16) // 2, 2, C_BTNTX)
+        lab = BTN_LABELS[i]
+        if lab:
+            prnt_st(lab, bx + (bw - 17) // 2, by + (bh - 8) // 2, 1, C_BTNTX)
+    draw_mode()
+
+def draw_mode():
+    bx, by, bw, bh = BTNS[0]
+    filled_rrect(bx, by, bw, bh, 8, C_BTN if mode == 0 else C_OK)
+    lab = MODE_NAMES[mode]
+    prnt_st(lab, bx + (bw - 17) // 2, by + (bh - 8) // 2, 1,
+            C_BTNTX if mode == 0 else C_BLACK)
 
 def btn_hit(tx, ty):
     for i in range(len(BTNS)):
-        bx, by, bw, bh, _ = BTNS[i]
+        bx, by, bw, bh = BTNS[i]
         if bx - 5 <= tx <= bx + bw + 5 and by - 5 <= ty <= by + bh + 5:
             return i
     return -1
@@ -401,7 +428,6 @@ def pen_line(x0, y0, x1, y1):
         return
     for i in range(0, d + 1, 2):
         pen_dot(x0 + (x1 - x0) * i // d, y0 + (y1 - y0) * i // d)
-
 
 _x28 = bytearray(784)
 
@@ -458,10 +484,25 @@ def rasterize():
             _x28[dst + gx] = grid[src + gx]
     return True
 
+
 LCD = LCD_1inch28()
 LCD.set_bl_pwm(65535)
 touch = CST816S()
 
+try:
+    net = EmnistNet()
+    model_ok = True
+    model_err = ""
+
+    ALLOWED = (
+        None,
+        tuple(i for i, ch in enumerate(net.cmap) if ch.isalpha()),
+        tuple(i for i, ch in enumerate(net.cmap) if ch.isdigit()),
+    )
+except Exception as e:
+    net = None
+    model_ok = False
+    model_err = str(e)
 
 USB_KBD     = True
 HOST_QWERTZ = False
@@ -472,29 +513,34 @@ if USB_KBD:
         import usb.device
         from usb.device.keyboard import KeyboardInterface
         hid = KeyboardInterface()
-
         usb.device.get().init(hid, builtin_driver=True)
     except ImportError:
         hid = None
 
 def usb_send(ch):
-
     if hid is None:
         return
     try:
         if not hid.is_open():
             return
         if ch == " ":
-            code = 44
+            code = 44  
         elif ch == "\b":
-            code = 42
+            code = 42  
+        elif "0" <= ch <= "9":
+            d = ord(ch) - 48
+            if HOST_QWERTZ:
+
+                code = 98 if d == 0 else 88 + d 
+            else:
+                code = 39 if d == 0 else 29 + d 
         else:
             i = ord(ch) - 65
             if not 0 <= i < 26:
                 return
             code = 4 + i
             if HOST_QWERTZ:
-                if code == 28:   code = 29
+                if code == 28:   code = 29 
                 elif code == 29: code = 28
         hid.send_keys((code,))
         time.sleep_ms(10)
@@ -513,14 +559,10 @@ has_ink = False
 
 draw_static()
 
-try:
-    net = EmnistNet()
-    model_ok = True
-except Exception as e:
-    net = None
-    model_ok = False
-    cntr_st("CHYBI EMNIST_W.BIN!", 100, 1, C_WARN)
-    cntr_st("NAHRAJ SOUBOR NA FLASH", 115, 1, C_WARN)
+if not model_ok:
+    cntr_st("CHYBA MODELU:", 92, 1, C_WARN)
+    cntr_st(model_err[:34].upper(), 106, 1, C_WARN)
+    cntr_st("NAHRAJ NOVY EMNIST_W.BIN", 120, 1, C_WARN)
 
 draw_text()
 usb_state = False
@@ -534,7 +576,7 @@ last_x = last_y = 0
 last_lift  = time.ticks_ms()
 last_show  = 0
 dirty      = False
-in_canvas  = False
+in_canvas  = False 
 
 while True:
     down, tx, ty = touch.read()
@@ -547,14 +589,18 @@ while True:
             if not in_canvas:
                 b = btn_hit(tx, ty)
                 if b == 0:
+                    mode = (mode + 1) % 3
+                    draw_mode()
+                    dirty = True
+                elif b == 1:
                     text = text[:-1]
                     usb_send("\b")
-                elif b == 1:
+                elif b == 2:
                     text += " "
                     usb_send(" ")
-                elif b == 2:
+                elif b == 3:
                     text = ""
-                if b >= 0:
+                if b >= 1:
                     draw_text()
                     dirty = True
         if in_canvas and model_ok:
@@ -577,9 +623,11 @@ while True:
         if has_ink and model_ok and time.ticks_diff(now, last_lift) > IDLE_MS:
             if rasterize():
                 t0 = time.ticks_ms()
-                cls, conf = net.predict(_x28)
+                cls, conf = net.predict(_x28, ALLOWED[mode])
                 dt = time.ticks_diff(time.ticks_ms(), t0)
-                letter = chr(ord('A') + cls)
+                letter = net.cmap[cls]
+                if "a" <= letter <= "z":
+                    letter = chr(ord(letter) - 32)
                 text += letter
                 usb_send(letter)
                 if len(text) > 60:
