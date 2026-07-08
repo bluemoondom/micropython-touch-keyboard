@@ -1,7 +1,7 @@
 # RP2350 Touch Keyboard & Touchpad
 
-A handwriting USB keyboard and mouse touchpad running on the [**Waveshare
-RP2350-Touch-LCD-1.28**](https://www.waveshare.com/wiki/RP2350-Touch-LCD-1.28) board (1.28" round touch display, 240×240, GC9A01A +
+A handwriting USB keyboard and mouse touchpad running on the **Waveshare**
+[RP2350-Touch-LCD-1.28](https://www.waveshare.com/wiki/RP2350-Touch-LCD-1.28) board (1.28" round touch display, 240×240, GC9A01A +
 CST816S). Draw a letter or digit on the screen with your finger, a neural
 network recognizes it and sends it to your computer as a real key press.
 A second screen turns the display into a touchpad with a scroll wheel.
