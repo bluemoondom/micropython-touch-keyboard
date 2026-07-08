@@ -8,8 +8,8 @@ A second screen turns the display into a touchpad with a scroll wheel.
 Everything runs in MicroPython directly on the RP2350 — no PC-side frameworks.
 
 ![usb-hid](usb-hid.JPG)
-![keyboard](keyboardJPG)
-![touchpad](touchpad.JPG)
+![keyboard](keyboard.jpg)
+![touchpad](touchpad.jpg)
 
 ## Features
 
